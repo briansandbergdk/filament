@@ -199,12 +199,6 @@ FrameGraphId <FrameGraphTexture> PostProcessManager::toneMapping(FrameGraph& fg,
         FrameGraphRenderTargetHandle rt;
     };
 
-    backend::SamplerParams sampler {
-            .filterMag = SamplerMagFilter::LINEAR,
-            .filterMin = SamplerMinFilter::LINEAR
-    };
-
-
     float bloom = 0.04f;
 
     auto bloomBlur = bloomPass(fg, input, TextureFormat::R11F_G11F_B10F);
@@ -227,8 +221,11 @@ FrameGraphId <FrameGraphTexture> PostProcessManager::toneMapping(FrameGraph& fg,
                 auto const& bloomTexture = resources.getTexture(data.bloom);
 
                 FMaterialInstance* pInstance = mTonemapping.getMaterialInstance();
-                pInstance->setParameter("colorBuffer", colorTexture, {});
-                pInstance->setParameter("bloomBuffer", bloomTexture, sampler);
+                pInstance->setParameter("colorBuffer", colorTexture, { /* shader uses texelFetch */ });
+                pInstance->setParameter("bloomBuffer", bloomTexture, {
+                        .filterMag = SamplerMagFilter::LINEAR,
+                        .filterMin = SamplerMinFilter::LINEAR /* always read base level in shader, maybe nearest is good enough too */
+                });
                 pInstance->setParameter("dithering", dithering);
                 pInstance->setParameter("bloom", bloom);
                 pInstance->setParameter("fxaa", fxaa);
@@ -903,11 +900,6 @@ FrameGraphId<FrameGraphTexture> PostProcessManager::bloomPass(FrameGraph& fg,
         uint8_t levels;
     };
 
-    backend::SamplerParams sampler {
-            .filterMag = SamplerMagFilter::LINEAR,
-            .filterMin = SamplerMinFilter::LINEAR
-    };
-
     auto& bloomPass = fg.addPass<BloomPassData>("Gaussian Blur Passes",
             [&](FrameGraph::Builder& builder, auto& data) {
                 data.levels = kLevels;
@@ -947,7 +939,10 @@ FrameGraphId<FrameGraphTexture> PostProcessManager::bloomPass(FrameGraph& fg,
                 auto const& outDesc = resources.getDescriptor(data.out);
 
                 mi->use(driver);
-                mi->setParameter("source", hwIn, sampler);
+                mi->setParameter("source", hwIn,  {
+                        .filterMag = SamplerMagFilter::LINEAR,
+                        .filterMin = SamplerMinFilter::LINEAR /* level is always 0 */
+                });
                 mi->setParameter("level", 0.0f);
 
                 // downsample phase
@@ -966,7 +961,10 @@ FrameGraphId<FrameGraphTexture> PostProcessManager::bloomPass(FrameGraph& fg,
                     driver.endRenderPass();
 
                     // prepare the next level
-                    mi->setParameter("source", hwOut, sampler);
+                    mi->setParameter("source", hwOut,  {
+                            .filterMag = SamplerMagFilter::LINEAR,
+                            .filterMin = SamplerMinFilter::LINEAR_MIPMAP_NEAREST
+                    });
                     mi->setParameter("level", float(i));
                 }
 
@@ -976,8 +974,8 @@ FrameGraphId<FrameGraphTexture> PostProcessManager::bloomPass(FrameGraph& fg,
                 pipeline.program = bloomUpsample.getProgram();
                 pipeline.rasterState = bloomUpsample.getMaterial()->getRasterState();
                 pipeline.scissor = mi->getScissor();
-                //pipeline.rasterState.blendFunctionSrcRGB = BlendFunction::ONE;
-                //pipeline.rasterState.blendFunctionDstRGB = BlendFunction::ONE;
+//                pipeline.rasterState.blendFunctionSrcRGB = BlendFunction::ONE;
+//                pipeline.rasterState.blendFunctionDstRGB = BlendFunction::ONE;
 
                 mi->use(driver);
 
@@ -989,7 +987,10 @@ FrameGraphId<FrameGraphTexture> PostProcessManager::bloomPass(FrameGraph& fg,
                     auto w = FTexture::valueForLevel(i - 1, outDesc.width);
                     auto h = FTexture::valueForLevel(i - 1, outDesc.height);
                     mi->setParameter("resolution", float4{ w, h, 1.0f / w, 1.0f / h });
-                    mi->setParameter("source", hwOut, sampler);
+                    mi->setParameter("source", hwOut, {
+                            .filterMag = SamplerMagFilter::LINEAR,
+                            .filterMin = SamplerMinFilter::LINEAR_MIPMAP_NEAREST
+                    });
                     mi->setParameter("level", float(i));
                     mi->commit(driver);
 
