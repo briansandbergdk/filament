@@ -132,6 +132,7 @@ private:
     PostProcessMaterial mBilateralBlur;
     PostProcessMaterial mSeparableGaussianBlur;
     PostProcessMaterial mBloomDownsample;
+    PostProcessMaterial mBloomUpsample;
     PostProcessMaterial mBlit;
     PostProcessMaterial mTonemapping;
     PostProcessMaterial mFxaa;

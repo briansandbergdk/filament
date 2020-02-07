@@ -116,6 +116,7 @@ void PostProcessManager::init() noexcept {
     mBilateralBlur = PostProcessMaterial(mEngine, MATERIALS_BILATERALBLUR_DATA, MATERIALS_BILATERALBLUR_SIZE);
     mSeparableGaussianBlur = PostProcessMaterial(mEngine, MATERIALS_SEPARABLEGAUSSIANBLUR_DATA, MATERIALS_SEPARABLEGAUSSIANBLUR_SIZE);
     mBloomDownsample = PostProcessMaterial(mEngine, MATERIALS_BLOOMDOWNSAMPLE_DATA, MATERIALS_BLOOMDOWNSAMPLE_SIZE);
+    mBloomUpsample = PostProcessMaterial(mEngine, MATERIALS_BLOOMUPSAMPLE_DATA, MATERIALS_BLOOMUPSAMPLE_SIZE);
     mBlit = PostProcessMaterial(mEngine, MATERIALS_BLIT_DATA, MATERIALS_BLIT_SIZE);
     mTonemapping = PostProcessMaterial(mEngine, MATERIALS_TONEMAPPING_DATA, MATERIALS_TONEMAPPING_SIZE);
     mFxaa = PostProcessMaterial(mEngine, MATERIALS_FXAA_DATA, MATERIALS_FXAA_SIZE);
@@ -170,14 +171,16 @@ void PostProcessManager::init() noexcept {
 void PostProcessManager::terminate(DriverApi& driver) noexcept {
     driver.destroyTexture(mNoSSAOTexture);
     driver.destroyTexture(mNoiseTexture);
-    mSSAO.terminate(mEngine);
-    mMipmapDepth.terminate(mEngine);
-    mBilateralBlur.terminate(mEngine);
-    mSeparableGaussianBlur.terminate(mEngine);
-    mBloomDownsample.terminate(mEngine);
-    mBlit.terminate(mEngine);
-    mTonemapping.terminate(mEngine);
-    mFxaa.terminate(mEngine);
+    FEngine& engine = mEngine;
+    mSSAO.terminate(engine);
+    mMipmapDepth.terminate(engine);
+    mBilateralBlur.terminate(engine);
+    mSeparableGaussianBlur.terminate(engine);
+    mBloomDownsample.terminate(engine);
+    mBloomUpsample.terminate(engine);
+    mBlit.terminate(engine);
+    mTonemapping.terminate(engine);
+    mFxaa.terminate(engine);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -931,7 +934,7 @@ FrameGraphId<FrameGraphTexture> PostProcessManager::bloomPass(FrameGraph& fg,
                     auto const& data, DriverApi& driver) {
 
                 PostProcessMaterial const& bloomDownsample = mBloomDownsample;
-                FMaterialInstance* const mi = bloomDownsample.getMaterialInstance();
+                FMaterialInstance* mi = bloomDownsample.getMaterialInstance();
 
                 PipelineState pipeline{
                         .program = bloomDownsample.getProgram(),
@@ -956,6 +959,7 @@ FrameGraphId<FrameGraphTexture> PostProcessManager::bloomPass(FrameGraph& fg,
                     mi->setParameter("resolution", float4{ w, h, 1.0f / w, 1.0f / h });
                     mi->commit(driver);
 
+                    hwOutRT.params.flags.discardStart = TargetBufferFlags::COLOR;
                     hwOutRT.params.flags.discardEnd = TargetBufferFlags::NONE;
                     driver.beginRenderPass(hwOutRT.target, hwOutRT.params);
                     driver.draw(pipeline, fullScreenRenderPrimitive);
@@ -967,13 +971,31 @@ FrameGraphId<FrameGraphTexture> PostProcessManager::bloomPass(FrameGraph& fg,
                 }
 
                 // upsample phase
+                PostProcessMaterial const& bloomUpsample = mBloomDownsample;
+                mi = bloomUpsample.getMaterialInstance();
+                pipeline.program = bloomUpsample.getProgram();
+                pipeline.rasterState = bloomUpsample.getMaterial()->getRasterState();
+                pipeline.scissor = mi->getScissor();
+                //pipeline.rasterState.blendFunctionSrcRGB = BlendFunction::ONE;
+                //pipeline.rasterState.blendFunctionDstRGB = BlendFunction::ONE;
+
+                mi->use(driver);
+
                 for (size_t i = data.levels - 1; i >= 1; i--) {
-                    auto hwSrcRT = resources.getRenderTarget(data.outRT[i]);
                     auto hwDstRT = resources.getRenderTarget(data.outRT[i - 1]);
-                    driver.blit(TargetBufferFlags::COLOR,
-                            hwDstRT.target, hwDstRT.params.viewport,
-                            hwSrcRT.target, hwSrcRT.params.viewport,
-                            SamplerMagFilter::LINEAR);
+                    hwDstRT.params.flags.discardStart = TargetBufferFlags::NONE; // because we'll blend
+                    hwDstRT.params.flags.discardEnd = TargetBufferFlags::NONE;
+
+                    auto w = FTexture::valueForLevel(i - 1, outDesc.width);
+                    auto h = FTexture::valueForLevel(i - 1, outDesc.height);
+                    mi->setParameter("resolution", float4{ w, h, 1.0f / w, 1.0f / h });
+                    mi->setParameter("source", hwOut, sampler);
+                    mi->setParameter("level", float(i));
+                    mi->commit(driver);
+
+                    driver.beginRenderPass(hwDstRT.target, hwDstRT.params);
+                    driver.draw(pipeline, fullScreenRenderPrimitive);
+                    driver.endRenderPass();
                 }
             });
 
