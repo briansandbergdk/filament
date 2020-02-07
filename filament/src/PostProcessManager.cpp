@@ -115,7 +115,7 @@ void PostProcessManager::init() noexcept {
     mMipmapDepth = PostProcessMaterial(mEngine, MATERIALS_MIPMAPDEPTH_DATA, MATERIALS_MIPMAPDEPTH_SIZE);
     mBilateralBlur = PostProcessMaterial(mEngine, MATERIALS_BILATERALBLUR_DATA, MATERIALS_BILATERALBLUR_SIZE);
     mSeparableGaussianBlur = PostProcessMaterial(mEngine, MATERIALS_SEPARABLEGAUSSIANBLUR_DATA, MATERIALS_SEPARABLEGAUSSIANBLUR_SIZE);
-    mBloomBlur = PostProcessMaterial(mEngine, MATERIALS_BLOOMBLUR_DATA, MATERIALS_BLOOMBLUR_SIZE);
+    mBloomDownsample = PostProcessMaterial(mEngine, MATERIALS_BLOOMDOWNSAMPLE_DATA, MATERIALS_BLOOMDOWNSAMPLE_SIZE);
     mBlit = PostProcessMaterial(mEngine, MATERIALS_BLIT_DATA, MATERIALS_BLIT_SIZE);
     mTonemapping = PostProcessMaterial(mEngine, MATERIALS_TONEMAPPING_DATA, MATERIALS_TONEMAPPING_SIZE);
     mFxaa = PostProcessMaterial(mEngine, MATERIALS_FXAA_DATA, MATERIALS_FXAA_SIZE);
@@ -174,7 +174,7 @@ void PostProcessManager::terminate(DriverApi& driver) noexcept {
     mMipmapDepth.terminate(mEngine);
     mBilateralBlur.terminate(mEngine);
     mSeparableGaussianBlur.terminate(mEngine);
-    mBloomBlur.terminate(mEngine);
+    mBloomDownsample.terminate(mEngine);
     mBlit.terminate(mEngine);
     mTonemapping.terminate(mEngine);
     mFxaa.terminate(mEngine);
@@ -204,7 +204,7 @@ FrameGraphId <FrameGraphTexture> PostProcessManager::toneMapping(FrameGraph& fg,
 
     float bloom = 0.04f;
 
-    auto bloomBlur = bloomBlurPass(fg, input, TextureFormat::R11F_G11F_B10F);
+    auto bloomBlur = bloomPass(fg, input, TextureFormat::R11F_G11F_B10F);
 
     auto& ppToneMapping = fg.addPass<PostProcessToneMapping>("tonemapping",
             [&](FrameGraph::Builder& builder, PostProcessToneMapping& data) {
@@ -886,18 +886,18 @@ FrameGraphId<FrameGraphTexture> PostProcessManager::gaussianBlurPass(FrameGraph&
     return gaussianBlurPasses.getData().out;
 }
 
-FrameGraphId<FrameGraphTexture> PostProcessManager::bloomBlurPass(FrameGraph& fg,
-        FrameGraphId<FrameGraphTexture> input, backend::TextureFormat outFormat) noexcept {
+FrameGraphId<FrameGraphTexture> PostProcessManager::bloomPass(FrameGraph& fg,
+                                                              FrameGraphId<FrameGraphTexture> input, backend::TextureFormat outFormat) noexcept {
 
     Handle<HwRenderPrimitive> fullScreenRenderPrimitive = mEngine.getFullScreenRenderPrimitive();
 
-    static constexpr size_t kLevels = 6;
+    static constexpr uint8_t kLevels = 6u;
 
     struct BloomPassData {
-        size_t levels;
         FrameGraphId<FrameGraphTexture> in;
         FrameGraphId<FrameGraphTexture> out;
         FrameGraphRenderTargetHandle outRT[kLevels];
+        uint8_t levels;
     };
 
     backend::SamplerParams sampler {
@@ -907,36 +907,35 @@ FrameGraphId<FrameGraphTexture> PostProcessManager::bloomBlurPass(FrameGraph& fg
 
     auto& bloomPass = fg.addPass<BloomPassData>("Gaussian Blur Passes",
             [&](FrameGraph::Builder& builder, auto& data) {
-                auto const& desc = builder.getDescriptor(input);
-
                 data.levels = kLevels;
+                auto const& desc = builder.getDescriptor(input);
 
                 data.in = builder.sample(input);
 
-                data.out = builder.createTexture("Bloom Texture", {
-                    .width = (desc.width + 1) / 2,
-                    .height = (desc.height + 1) / 2,
-                    .levels = kLevels,
-                    .format = outFormat
-                });
-
+                FrameGraphTexture::Descriptor ddd = {
+                        .width = (desc.width + 1) / 2,
+                        .height = (desc.height + 1) / 2,
+                        .levels = data.levels,
+                        .format = outFormat
+                };
+                data.out = builder.createTexture("Bloom Texture", ddd);
                 data.out = builder.write(builder.sample(data.out));
 
                 for (size_t i = 0; i < kLevels; i++) {
                     data.outRT[i] = builder.createRenderTarget("Bloom target", {
-                            .attachments = { {data.out, uint8_t(i)}, {}}
+                            .attachments = {{ data.out, uint8_t(i) }, {}}
                     }, TargetBufferFlags::NONE);
                 }
             },
             [=](FrameGraphPassResources const& resources,
                     auto const& data, DriverApi& driver) {
 
-                PostProcessMaterial const& bloomBlur = mBloomBlur;
-                FMaterialInstance* const mi = bloomBlur.getMaterialInstance();
+                PostProcessMaterial const& bloomDownsample = mBloomDownsample;
+                FMaterialInstance* const mi = bloomDownsample.getMaterialInstance();
 
                 PipelineState pipeline{
-                        .program = bloomBlur.getProgram(),
-                        .rasterState = bloomBlur.getMaterial()->getRasterState(),
+                        .program = bloomDownsample.getProgram(),
+                        .rasterState = bloomDownsample.getMaterial()->getRasterState(),
                         .scissor = mi->getScissor(),
                 };
 
@@ -948,6 +947,7 @@ FrameGraphId<FrameGraphTexture> PostProcessManager::bloomBlurPass(FrameGraph& fg
                 mi->setParameter("source", hwIn, sampler);
                 mi->setParameter("level", 0.0f);
 
+                // downsample phase
                 for (size_t i = 0; i < data.levels; i++) {
                     auto hwOutRT = resources.getRenderTarget(data.outRT[i]);
 
@@ -964,6 +964,16 @@ FrameGraphId<FrameGraphTexture> PostProcessManager::bloomBlurPass(FrameGraph& fg
                     // prepare the next level
                     mi->setParameter("source", hwOut, sampler);
                     mi->setParameter("level", float(i));
+                }
+
+                // upsample phase
+                for (size_t i = data.levels - 1; i >= 1; i--) {
+                    auto hwSrcRT = resources.getRenderTarget(data.outRT[i]);
+                    auto hwDstRT = resources.getRenderTarget(data.outRT[i - 1]);
+                    driver.blit(TargetBufferFlags::COLOR,
+                            hwDstRT.target, hwDstRT.params.viewport,
+                            hwSrcRT.target, hwSrcRT.params.viewport,
+                            SamplerMagFilter::LINEAR);
                 }
             });
 

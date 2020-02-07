@@ -98,8 +98,8 @@ private:
             FrameGraphId<FrameGraphTexture> input,
             FrameGraphId<FrameGraphTexture> depth, math::int2 axis) noexcept;
 
-    FrameGraphId<FrameGraphTexture> bloomBlurPass(FrameGraph& fg,
-            FrameGraphId<FrameGraphTexture> input, backend::TextureFormat outFormat) noexcept;
+    FrameGraphId<FrameGraphTexture> bloomPass(FrameGraph& fg,
+                                              FrameGraphId<FrameGraphTexture> input, backend::TextureFormat outFormat) noexcept;
 
 
     class PostProcessMaterial {
@@ -131,7 +131,7 @@ private:
     PostProcessMaterial mMipmapDepth;
     PostProcessMaterial mBilateralBlur;
     PostProcessMaterial mSeparableGaussianBlur;
-    PostProcessMaterial mBloomBlur;
+    PostProcessMaterial mBloomDownsample;
     PostProcessMaterial mBlit;
     PostProcessMaterial mTonemapping;
     PostProcessMaterial mFxaa;

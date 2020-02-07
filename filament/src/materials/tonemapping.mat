@@ -9,6 +9,7 @@ material {
         {
             type : sampler2d,
             name : bloomBuffer,
+            precision: medium
         },
         {
             type : int,
